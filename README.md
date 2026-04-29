@@ -243,3 +243,4 @@ MIT License with Attribution Requirement - see [LICENSE](LICENSE) file for detai
 - **Created by**: Pietro Schirano ([@Doriandarko](https://github.com/Doriandarko))
 - **Powered by**: Google's Gemini 3 Flash model
 - **Repository**: https://github.com/Doriandarko/gemini-writer
+
