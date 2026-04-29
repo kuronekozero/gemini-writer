@@ -11,6 +11,7 @@ import sys
 import json
 import argparse
 import time
+import httpx
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -135,10 +136,7 @@ def main():
         api_key = openrouter_api_key
         provider = "OpenRouter (Gemini model)"
         openrouter_mode = True
-        client = genai.Client(
-            api_key=api_key,
-            http_options=types.HttpOptions(base_url=openrouter_base_url)
-        )
+        client = None
     else:
         # Default Gemini path
         api_key = os.getenv("GEMINI_API_KEY")
@@ -166,28 +164,47 @@ def main():
     try:
         print("🔎 Running startup connectivity probe...")
         probe_start = time.time()
-        probe_response = client.models.generate_content(
-            model=MODEL_NAME,
-            contents="Reply with exactly: OK",
-            config=types.GenerateContentConfig(
-                temperature=0.0,
-                max_output_tokens=10,
-                http_options=types.HttpOptions(timeout=API_TIMEOUT_SECONDS * 1000),
-            ),
-        )
-        probe_text = (probe_response.text or "").strip()
+        if openrouter_mode:
+            probe_payload = {
+                "model": MODEL_NAME,
+                "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+                "max_tokens": 10,
+                "temperature": 0.0,
+            }
+            with httpx.Client(timeout=API_TIMEOUT_SECONDS) as http:
+                probe_response = http.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=probe_payload,
+                )
+            probe_response.raise_for_status()
+            probe_text = probe_response.json()["choices"][0]["message"]["content"].strip()
+        else:
+            probe_response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents="Reply with exactly: OK",
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=10,
+                    http_options=types.HttpOptions(timeout=API_TIMEOUT_SECONDS * 1000),
+                ),
+            )
+            probe_text = (probe_response.text or "").strip()
         print(f"✓ Probe succeeded in {time.time() - probe_start:.1f}s | Response: {probe_text}\n")
     except Exception as e:
         print("\n✗ Startup probe failed.")
         print(f"  Provider: {provider}")
         print(f"  Model: {MODEL_NAME}")
-        print(f"  Base URL: {openrouter_base_url if openrouter_mode else 'Gemini default'}")
+        print(f"  Base URL: {'https://openrouter.ai/api/v1/chat/completions' if openrouter_mode else 'Gemini default'}")
         print(f"  Error type: {type(e).__name__}")
         print(f"  Error: {e}")
         print("\nTroubleshooting:")
         print("  1) Verify MODEL_NAME exists for your provider.")
         print("  2) Try a lower timeout: API_TIMEOUT_SECONDS=30")
-        print("  3) For OpenRouter, test a plain prompt with curl/OpenRouter SDK.")
+        print("  3) Ensure OPENROUTER_API_KEY is active and has credits.")
         sys.exit(1)
     
     # Get user input
@@ -209,6 +226,41 @@ def main():
         role="user",
         parts=[types.Part.from_text(text=initial_message)]
     ))
+
+    if openrouter_mode:
+        print("🚀 OpenRouter quick-run mode: sending one chat-completions request.\n")
+        try:
+            call_start = time.time()
+            payload = {
+                "model": MODEL_NAME,
+                "messages": [
+                    {"role": "system", "content": get_system_prompt()},
+                    {"role": "user", "content": initial_message},
+                ],
+                "temperature": 1.0,
+            }
+            with httpx.Client(timeout=API_TIMEOUT_SECONDS) as http:
+                response = http.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+            response.raise_for_status()
+            data = response.json()
+            content_text = data["choices"][0]["message"]["content"]
+            print("💬 Response:")
+            print("-" * 60)
+            print(content_text)
+            print("-" * 60)
+            if DEBUG_API:
+                print(f"\n⏱️  OpenRouter call completed in {time.time() - call_start:.1f}s")
+            return
+        except Exception as e:
+            print(f"\n✗ OpenRouter quick-run failed: {type(e).__name__}: {e}")
+            sys.exit(1)
     
     # Get tool definitions and mapping
     tools = get_tool_definitions()
