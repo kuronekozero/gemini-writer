@@ -27,6 +27,8 @@ from utils import (
     get_system_prompt,
 )
 from tools.compression import compress_context_impl
+from tools.project import create_project_impl, get_active_project_folder
+from tools.writer import write_file_impl
 
 
 # Constants
@@ -255,6 +257,20 @@ def main():
             print("-" * 60)
             print(content_text)
             print("-" * 60)
+
+            project_name = f"openrouter_{time.strftime('%Y%m%d_%H%M%S')}"
+            create_status = create_project_impl(project_name=project_name)
+            print(f"\n📁 {create_status}")
+            save_status = write_file_impl(
+                filename="book.md",
+                content=content_text,
+                mode="create",
+            )
+            print(f"💾 {save_status}")
+            active_folder = get_active_project_folder()
+            if active_folder:
+                print(f"📍 Output path: {active_folder}{os.sep}book.md")
+
             if DEBUG_API:
                 print(f"\n⏱️  OpenRouter call completed in {time.time() - call_start:.1f}s")
             return
