@@ -78,6 +78,9 @@ Examples:
 
   # Fresh start with prompt loaded from a file
   python kimi-writer.py --prompt-file my_prompt.txt
+
+  # Shortcut: pass a file path as the only positional argument
+  python kimi-writer.py my_prompt.txt
   
   # Recovery mode from previous context
   python kimi-writer.py --recover my_project/.context_summary_20250107_143022.md
@@ -117,6 +120,13 @@ Examples:
     
     # Check if prompt provided as argument
     if args.prompt:
+        # Convenience: if a single positional arg is a real file path, treat it as prompt file
+        if os.path.isfile(args.prompt):
+            prompt_text = load_context_from_file(args.prompt).strip()
+            if not prompt_text:
+                print("Error: Prompt file is empty.")
+                sys.exit(1)
+            return prompt_text, False
         return args.prompt, False
     
     # Interactive prompt
