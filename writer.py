@@ -10,6 +10,7 @@ import os
 import sys
 import json
 import argparse
+import time
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -33,6 +34,8 @@ TOKEN_LIMIT = 1000000  # Gemini has 1M context window
 COMPRESSION_THRESHOLD = 900000  # Trigger compression at 90% of limit
 MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3-flash-preview")
 BACKUP_INTERVAL = 50  # Save backup summary every N iterations
+API_TIMEOUT_SECONDS = int(os.getenv("API_TIMEOUT_SECONDS", "90"))
+DEBUG_API = os.getenv("DEBUG_API", "1").lower() in {"1", "true", "yes", "on"}
 
 
 def load_context_from_file(file_path: str) -> str:
@@ -156,6 +159,36 @@ def main():
     print(f"✓ Client initialized via: {provider}\n")
     if openrouter_mode:
         print("ℹ️  OpenRouter compatibility mode: thinking/tools are disabled for stability.\n")
+    print(f"✓ API timeout per call: {API_TIMEOUT_SECONDS}s")
+    print(f"✓ Debug logging: {'ON' if DEBUG_API else 'OFF'}\n")
+
+    # Fast connectivity probe to fail early instead of hanging at iteration 1
+    try:
+        print("🔎 Running startup connectivity probe...")
+        probe_start = time.time()
+        probe_response = client.models.generate_content(
+            model=MODEL_NAME,
+            contents="Reply with exactly: OK",
+            config=types.GenerateContentConfig(
+                temperature=0.0,
+                max_output_tokens=10,
+                http_options=types.HttpOptions(timeout=API_TIMEOUT_SECONDS * 1000),
+            ),
+        )
+        probe_text = (probe_response.text or "").strip()
+        print(f"✓ Probe succeeded in {time.time() - probe_start:.1f}s | Response: {probe_text}\n")
+    except Exception as e:
+        print("\n✗ Startup probe failed.")
+        print(f"  Provider: {provider}")
+        print(f"  Model: {MODEL_NAME}")
+        print(f"  Base URL: {openrouter_base_url if openrouter_mode else 'Gemini default'}")
+        print(f"  Error type: {type(e).__name__}")
+        print(f"  Error: {e}")
+        print("\nTroubleshooting:")
+        print("  1) Verify MODEL_NAME exists for your provider.")
+        print("  2) Try a lower timeout: API_TIMEOUT_SECONDS=30")
+        print("  3) For OpenRouter, test a plain prompt with curl/OpenRouter SDK.")
+        sys.exit(1)
     
     # Get user input
     user_prompt, is_recovery = get_user_input()
@@ -293,13 +326,19 @@ def main():
         # Call the model
         try:
             print("🤖 Calling Gemini model...\n")
+            call_start = time.time()
             
             # Use non-streaming to get complete response with thought_signature
             response = client.models.generate_content(
                 model=MODEL_NAME,
                 contents=contents,
-                config=generate_config,
+                config=types.GenerateContentConfig(
+                    **generate_config.model_dump(exclude_none=True),
+                    http_options=types.HttpOptions(timeout=API_TIMEOUT_SECONDS * 1000),
+                ),
             )
+            if DEBUG_API:
+                print(f"⏱️  API call completed in {time.time() - call_start:.1f}s")
             
             # Process the response
             thinking_text = ""
