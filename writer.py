@@ -278,7 +278,28 @@ def main():
                 )
             response.raise_for_status()
             data = response.json()
-            content_text = data["choices"][0]["message"]["content"]
+            message = data.get("choices", [{}])[0].get("message", {})
+            raw_content = message.get("content")
+            if isinstance(raw_content, str):
+                content_text = raw_content
+            elif isinstance(raw_content, list):
+                text_chunks = []
+                for item in raw_content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text_chunks.append(item.get("text", ""))
+                content_text = "\n".join(chunk for chunk in text_chunks if chunk).strip()
+            else:
+                content_text = ""
+
+            if not content_text:
+                reasoning = data.get("choices", [{}])[0].get("reasoning")
+                if isinstance(reasoning, str) and reasoning.strip():
+                    content_text = reasoning.strip()
+                else:
+                    content_text = (
+                        "Model returned no text content. "
+                        "Try lowering prompt size, setting max_tokens, or using a different model."
+                    )
             print("💬 Response:")
             print("-" * 60)
             print(content_text)
@@ -289,10 +310,17 @@ def main():
             print(f"\n📁 {create_status}")
             save_status = write_file_impl(
                 filename="book.md",
-                content=content_text,
+                content=str(content_text),
                 mode="create",
             )
             print(f"💾 {save_status}")
+            if "no text content" in content_text.lower():
+                debug_status = write_file_impl(
+                    filename="openrouter_raw_response.json",
+                    content=json.dumps(data, ensure_ascii=False, indent=2),
+                    mode="create",
+                )
+                print(f"🧪 {debug_status}")
             active_folder = get_active_project_folder()
             if active_folder:
                 print(f"📍 Output path: {active_folder}{os.sep}book.md")
