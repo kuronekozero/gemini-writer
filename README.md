@@ -47,10 +47,19 @@ cp env.example .env
 
 # Edit .env and add your API key
 # The file should contain:
+# Option A: Direct Gemini API
 GEMINI_API_KEY=your-api-key-here
+
+# Option B: OpenRouter with Gemini models
+OPENROUTER_API_KEY=your-openrouter-key-here
+# Optional (defaults to this value)
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1beta
+# Example model name on OpenRouter
+MODEL_NAME=google/gemini-2.5-pro-preview
 ```
 
 Get your Gemini API key from: https://aistudio.google.com/app/apikey
+Get your OpenRouter API key from: https://openrouter.ai/keys
 
 ## Usage
 
@@ -183,15 +192,23 @@ Press `Ctrl+C` to interrupt. The agent will save the current context for recover
 
 ## Troubleshooting
 
-### "GEMINI_API_KEY environment variable not set"
-Make sure you have created a `.env` file in the project root with your API key:
+### "No API key configured"
+Make sure you have created a `.env` file in the project root with either a Gemini key or an OpenRouter key:
 ```bash
+# Direct Gemini
 GEMINI_API_KEY=your-actual-api-key-here
+
+# OR OpenRouter
+OPENROUTER_API_KEY=your-openrouter-key-here
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1beta
 ```
 
 ### "401 Unauthorized" or Authentication errors
 - Verify your API key is correct in the `.env` file
 - Get your API key from: https://aistudio.google.com/app/apikey
+
+### OpenRouter request appears stuck at "Calling Gemini model..."
+If you're using OpenRouter, the app now runs in a compatibility mode that disables Gemini-specific thinking and tool-calling features for better reliability. This is expected behavior and helps avoid hanging requests on some OpenRouter routes.
 
 ### "Error creating project folder"
 Check write permissions in the current directory
@@ -204,7 +221,7 @@ The agent automatically compresses context at 900K tokens. If you see compressio
 
 ## Technical Details
 
-- **Model**: gemini-3-flash-preview
+- **Model**: Configurable via `MODEL_NAME` (default: `gemini-3-flash-preview`)
 - **Thinking Level**: HIGH (for better reasoning)
 - **Temperature**: 1.0
 - **Context Window**: 1,000,000 tokens
@@ -226,5 +243,3 @@ MIT License with Attribution Requirement - see [LICENSE](LICENSE) file for detai
 - **Created by**: Pietro Schirano ([@Doriandarko](https://github.com/Doriandarko))
 - **Powered by**: Google's Gemini 3 Flash model
 - **Repository**: https://github.com/Doriandarko/gemini-writer
-
-
