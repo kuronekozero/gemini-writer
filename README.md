@@ -207,6 +207,9 @@ OPENROUTER_BASE_URL=https://openrouter.ai/api/v1beta
 - Verify your API key is correct in the `.env` file
 - Get your API key from: https://aistudio.google.com/app/apikey
 
+### OpenRouter request appears stuck at "Calling Gemini model..."
+If you're using OpenRouter, the app now runs in a compatibility mode that disables Gemini-specific thinking and tool-calling features for better reliability. This is expected behavior and helps avoid hanging requests on some OpenRouter routes.
+
 ### "Error creating project folder"
 Check write permissions in the current directory
 

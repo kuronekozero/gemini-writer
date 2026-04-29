@@ -122,6 +122,7 @@ def main():
     api_key = None
     client = None
     provider = "Gemini API"
+    openrouter_mode = False
 
     # Optional OpenRouter path
     openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
@@ -130,6 +131,7 @@ def main():
     if openrouter_api_key:
         api_key = openrouter_api_key
         provider = "OpenRouter (Gemini model)"
+        openrouter_mode = True
         client = genai.Client(
             api_key=api_key,
             http_options=types.HttpOptions(base_url=openrouter_base_url)
@@ -152,6 +154,8 @@ def main():
         print(f"⚠️  Warning: API key seems too short ({len(api_key)} chars)")
     
     print(f"✓ Client initialized via: {provider}\n")
+    if openrouter_mode:
+        print("ℹ️  OpenRouter compatibility mode: thinking/tools are disabled for stability.\n")
     
     # Get user input
     user_prompt, is_recovery = get_user_input()
@@ -268,15 +272,23 @@ def main():
             except Exception as e:
                 print(f"⚠️  Warning: Backup failed: {e}\n")
         
-        # Configure generation with thinking enabled
-        generate_config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            thinking_config=types.ThinkingConfig(
-                thinking_level="HIGH",
-            ),
-            tools=[tools],
-            temperature=1.0,
-        )
+        # Configure generation
+        # NOTE: OpenRouter compatibility mode disables Gemini-specific thinking+tools
+        # to prevent hanging calls on some OpenRouter routes.
+        if openrouter_mode:
+            generate_config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=1.0,
+            )
+        else:
+            generate_config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="HIGH",
+                ),
+                tools=[tools],
+                temperature=1.0,
+            )
         
         # Call the model
         try:
