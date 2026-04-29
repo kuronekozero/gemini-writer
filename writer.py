@@ -75,6 +75,9 @@ def get_user_input() -> tuple[str, bool]:
 Examples:
   # Fresh start with inline prompt
   python kimi-writer.py "Create a collection of sci-fi short stories"
+
+  # Fresh start with prompt loaded from a file
+  python kimi-writer.py --prompt-file my_prompt.txt
   
   # Recovery mode from previous context
   python kimi-writer.py --recover my_project/.context_summary_20250107_143022.md
@@ -91,6 +94,11 @@ Examples:
         type=str,
         help='Path to a context summary file to continue from'
     )
+    parser.add_argument(
+        '--prompt-file',
+        type=str,
+        help='Path to a text/markdown file containing your prompt'
+    )
     
     args = parser.parse_args()
     
@@ -98,6 +106,14 @@ Examples:
     if args.recover:
         context = load_context_from_file(args.recover)
         return context, True
+
+    # Prompt from file (helps with very long prompts)
+    if args.prompt_file:
+        prompt_text = load_context_from_file(args.prompt_file).strip()
+        if not prompt_text:
+            print("Error: Prompt file is empty.")
+            sys.exit(1)
+        return prompt_text, False
     
     # Check if prompt provided as argument
     if args.prompt:
