@@ -31,7 +31,7 @@ from tools.compression import compress_context_impl
 MAX_ITERATIONS = 300
 TOKEN_LIMIT = 1000000  # Gemini has 1M context window
 COMPRESSION_THRESHOLD = 900000  # Trigger compression at 90% of limit
-MODEL_NAME = "gemini-3-flash-preview"
+MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3-flash-preview")
 BACKUP_INTERVAL = 50  # Save backup summary every N iterations
 
 
@@ -119,13 +119,31 @@ Examples:
 
 def main():
     """Main agent loop."""
-    
-    # Get API key
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not set.")
-        print("Please set your API key: export GEMINI_API_KEY='your-key-here'")
-        sys.exit(1)
+    api_key = None
+    client = None
+    provider = "Gemini API"
+
+    # Optional OpenRouter path
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+    openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1beta")
+
+    if openrouter_api_key:
+        api_key = openrouter_api_key
+        provider = "OpenRouter (Gemini model)"
+        client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(base_url=openrouter_base_url)
+        )
+    else:
+        # Default Gemini path
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            print("Error: No API key configured.")
+            print("Set one of:")
+            print("  - OPENROUTER_API_KEY (recommended if using OpenRouter)")
+            print("  - GEMINI_API_KEY (direct Gemini API)")
+            sys.exit(1)
+        client = genai.Client(api_key=api_key)
     
     # Debug: Show that key is loaded (masked for security)
     if len(api_key) > 8:
@@ -133,10 +151,7 @@ def main():
     else:
         print(f"⚠️  Warning: API key seems too short ({len(api_key)} chars)")
     
-    # Initialize Gemini client
-    client = genai.Client(api_key=api_key)
-    
-    print(f"✓ Gemini client initialized\n")
+    print(f"✓ Client initialized via: {provider}\n")
     
     # Get user input
     user_prompt, is_recovery = get_user_input()
