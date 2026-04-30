@@ -10,6 +10,8 @@ import os
 import sys
 import json
 import argparse
+import time
+import httpx
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
@@ -25,14 +27,21 @@ from utils import (
     get_system_prompt,
 )
 from tools.compression import compress_context_impl
+from tools.project import create_project_impl, get_active_project_folder
+from tools.writer import write_file_impl
 
 
 # Constants
 MAX_ITERATIONS = 300
 TOKEN_LIMIT = 1000000  # Gemini has 1M context window
 COMPRESSION_THRESHOLD = 900000  # Trigger compression at 90% of limit
-MODEL_NAME = "gemini-3-flash-preview"
+MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3-flash-preview")
 BACKUP_INTERVAL = 50  # Save backup summary every N iterations
+API_TIMEOUT_SECONDS = int(os.getenv("API_TIMEOUT_SECONDS", "90"))
+DEBUG_API = os.getenv("DEBUG_API", "1").lower() in {"1", "true", "yes", "on"}
+OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "4000"))
+OPENROUTER_PARTS = int(os.getenv("OPENROUTER_PARTS", "8"))
+OPENROUTER_MAX_ITERATIONS = int(os.getenv("OPENROUTER_MAX_ITERATIONS", "20"))
 
 
 def load_context_from_file(file_path: str) -> str:
@@ -69,6 +78,12 @@ def get_user_input() -> tuple[str, bool]:
 Examples:
   # Fresh start with inline prompt
   python kimi-writer.py "Create a collection of sci-fi short stories"
+
+  # Fresh start with prompt loaded from a file
+  python kimi-writer.py --prompt-file my_prompt.txt
+
+  # Shortcut: pass a file path as the only positional argument
+  python kimi-writer.py my_prompt.txt
   
   # Recovery mode from previous context
   python kimi-writer.py --recover my_project/.context_summary_20250107_143022.md
@@ -85,6 +100,11 @@ Examples:
         type=str,
         help='Path to a context summary file to continue from'
     )
+    parser.add_argument(
+        '--prompt-file',
+        type=str,
+        help='Path to a text/markdown file containing your prompt'
+    )
     
     args = parser.parse_args()
     
@@ -92,9 +112,24 @@ Examples:
     if args.recover:
         context = load_context_from_file(args.recover)
         return context, True
+
+    # Prompt from file (helps with very long prompts)
+    if args.prompt_file:
+        prompt_text = load_context_from_file(args.prompt_file).strip()
+        if not prompt_text:
+            print("Error: Prompt file is empty.")
+            sys.exit(1)
+        return prompt_text, False
     
     # Check if prompt provided as argument
     if args.prompt:
+        # Convenience: if a single positional arg is a real file path, treat it as prompt file
+        if os.path.isfile(args.prompt):
+            prompt_text = load_context_from_file(args.prompt).strip()
+            if not prompt_text:
+                print("Error: Prompt file is empty.")
+                sys.exit(1)
+            return prompt_text, False
         return args.prompt, False
     
     # Interactive prompt
@@ -119,13 +154,30 @@ Examples:
 
 def main():
     """Main agent loop."""
-    
-    # Get API key
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("Error: GEMINI_API_KEY environment variable not set.")
-        print("Please set your API key: export GEMINI_API_KEY='your-key-here'")
-        sys.exit(1)
+    api_key = None
+    client = None
+    provider = "Gemini API"
+    openrouter_mode = False
+
+    # Optional OpenRouter path
+    openrouter_api_key = os.getenv("OPENROUTER_API_KEY")
+    openrouter_base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1beta")
+
+    if openrouter_api_key:
+        api_key = openrouter_api_key
+        provider = "OpenRouter (Gemini model)"
+        openrouter_mode = True
+        client = None
+    else:
+        # Default Gemini path
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            print("Error: No API key configured.")
+            print("Set one of:")
+            print("  - OPENROUTER_API_KEY (recommended if using OpenRouter)")
+            print("  - GEMINI_API_KEY (direct Gemini API)")
+            sys.exit(1)
+        client = genai.Client(api_key=api_key)
     
     # Debug: Show that key is loaded (masked for security)
     if len(api_key) > 8:
@@ -133,10 +185,58 @@ def main():
     else:
         print(f"⚠️  Warning: API key seems too short ({len(api_key)} chars)")
     
-    # Initialize Gemini client
-    client = genai.Client(api_key=api_key)
-    
-    print(f"✓ Gemini client initialized\n")
+    print(f"✓ Client initialized via: {provider}\n")
+    if openrouter_mode:
+        print("ℹ️  OpenRouter compatibility mode: thinking/tools are disabled for stability.\n")
+    print(f"✓ API timeout per call: {API_TIMEOUT_SECONDS}s")
+    print(f"✓ Debug logging: {'ON' if DEBUG_API else 'OFF'}\n")
+
+    # Fast connectivity probe to fail early instead of hanging at iteration 1
+    try:
+        print("🔎 Running startup connectivity probe...")
+        probe_start = time.time()
+        if openrouter_mode:
+            probe_payload = {
+                "model": MODEL_NAME,
+                "messages": [{"role": "user", "content": "Reply with exactly: OK"}],
+                "max_tokens": 10,
+                "temperature": 0.0,
+            }
+            with httpx.Client(timeout=API_TIMEOUT_SECONDS) as http:
+                probe_response = http.post(
+                    "https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=probe_payload,
+                )
+            probe_response.raise_for_status()
+            probe_text = probe_response.json()["choices"][0]["message"]["content"].strip()
+        else:
+            probe_response = client.models.generate_content(
+                model=MODEL_NAME,
+                contents="Reply with exactly: OK",
+                config=types.GenerateContentConfig(
+                    temperature=0.0,
+                    max_output_tokens=10,
+                    http_options=types.HttpOptions(timeout=API_TIMEOUT_SECONDS * 1000),
+                ),
+            )
+            probe_text = (probe_response.text or "").strip()
+        print(f"✓ Probe succeeded in {time.time() - probe_start:.1f}s | Response: {probe_text}\n")
+    except Exception as e:
+        print("\n✗ Startup probe failed.")
+        print(f"  Provider: {provider}")
+        print(f"  Model: {MODEL_NAME}")
+        print(f"  Base URL: {'https://openrouter.ai/api/v1/chat/completions' if openrouter_mode else 'Gemini default'}")
+        print(f"  Error type: {type(e).__name__}")
+        print(f"  Error: {e}")
+        print("\nTroubleshooting:")
+        print("  1) Verify MODEL_NAME exists for your provider.")
+        print("  2) Try a lower timeout: API_TIMEOUT_SECONDS=30")
+        print("  3) Ensure OPENROUTER_API_KEY is active and has credits.")
+        sys.exit(1)
     
     # Get user input
     user_prompt, is_recovery = get_user_input()
@@ -157,6 +257,117 @@ def main():
         role="user",
         parts=[types.Part.from_text(text=initial_message)]
     ))
+
+    if openrouter_mode:
+        print("🚀 OpenRouter iterative mode: generating long-form output in multiple steps.\n")
+        try:
+            call_start = time.time()
+            parts = OPENROUTER_PARTS if len(initial_message) > 5000 else max(3, OPENROUTER_PARTS // 2)
+            print(f"🧩 Planned parts: {parts} | max_tokens/part: {OPENROUTER_MAX_TOKENS} | max_iterations: {OPENROUTER_MAX_ITERATIONS}\n")
+
+            project_name = f"openrouter_{time.strftime('%Y%m%d_%H%M%S')}"
+            create_status = create_project_impl(project_name=project_name)
+            print(f"\n📁 {create_status}")
+            history_messages = [{"role": "system", "content": get_system_prompt()}]
+            history_messages.append({
+                "role": "user",
+                "content": (
+                    f"{initial_message}\n\n"
+                    "IMPORTANT EXECUTION RULES:\n"
+                    "1) Write the full book in multiple continuous parts.\n"
+                    "2) End every partial response with: [[CONTINUE]]\n"
+                    "3) End the final response with: [[BOOK_COMPLETE]]\n"
+                    "4) Never restart from the beginning.\n"
+                ),
+            })
+
+            part_index = 0
+            while part_index < OPENROUTER_MAX_ITERATIONS:
+                part_index += 1
+                if part_index == 1:
+                    user_content = "Start writing PART 1 now."
+                else:
+                    user_content = (
+                        "Continue from the exact last sentence. "
+                        "Do not repeat prior text. Continue the same book."
+                    )
+                history_messages.append({"role": "user", "content": user_content})
+                approx_prompt_tokens = sum(len(m.get("content", "")) for m in history_messages) // 4
+                print(f"\n📊 Iteration {part_index}/{OPENROUTER_MAX_ITERATIONS} | Approx prompt tokens: {approx_prompt_tokens:,}")
+
+                payload = {
+                    "model": MODEL_NAME,
+                    "messages": history_messages,
+                    "temperature": 1.0,
+                    "max_tokens": OPENROUTER_MAX_TOKENS,
+                }
+                with httpx.Client(timeout=API_TIMEOUT_SECONDS) as http:
+                    response = http.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
+                response.raise_for_status()
+                data = response.json()
+                message = data.get("choices", [{}])[0].get("message", {})
+                raw_content = message.get("content")
+                if isinstance(raw_content, str):
+                    content_text = raw_content
+                elif isinstance(raw_content, list):
+                    text_chunks = []
+                    for item in raw_content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            text_chunks.append(item.get("text", ""))
+                    content_text = "\n".join(chunk for chunk in text_chunks if chunk).strip()
+                else:
+                    content_text = ""
+
+                if not content_text:
+                    reasoning = data.get("choices", [{}])[0].get("reasoning")
+                    if isinstance(reasoning, str) and reasoning.strip():
+                        content_text = reasoning.strip()
+                    else:
+                        content_text = (
+                            "Model returned no text content. "
+                            "Try lowering prompt size, setting max_tokens, or using a different model."
+                        )
+
+                mode = "create" if part_index == 1 else "append"
+                header = f"\n\n# Part {part_index}\n\n"
+                save_status = write_file_impl(
+                    filename="book.md",
+                    content=f"{header}{str(content_text)}",
+                    mode=mode,
+                )
+                print(f"💾 Part {part_index}/{parts}: {save_status}")
+                history_messages.append({"role": "assistant", "content": str(content_text)})
+                approx_output_tokens = len(str(content_text)) // 4
+                print(f"📈 Approx output tokens this part: {approx_output_tokens:,}")
+
+                if "[[BOOK_COMPLETE]]" in str(content_text):
+                    print("\n✅ Model indicated completion with [[BOOK_COMPLETE]].")
+                    break
+
+                if "no text content" in content_text.lower():
+                    debug_status = write_file_impl(
+                        filename=f"openrouter_raw_response_part_{part_index}.json",
+                        content=json.dumps(data, ensure_ascii=False, indent=2),
+                        mode="create",
+                    )
+                    print(f"🧪 {debug_status}")
+            active_folder = get_active_project_folder()
+            if active_folder:
+                print(f"📍 Output path: {active_folder}{os.sep}book.md")
+
+            if DEBUG_API:
+                print(f"\n⏱️  OpenRouter call completed in {time.time() - call_start:.1f}s")
+            return
+        except Exception as e:
+            print(f"\n✗ OpenRouter quick-run failed: {type(e).__name__}: {e}")
+            sys.exit(1)
     
     # Get tool definitions and mapping
     tools = get_tool_definitions()
@@ -253,26 +464,40 @@ def main():
             except Exception as e:
                 print(f"⚠️  Warning: Backup failed: {e}\n")
         
-        # Configure generation with thinking enabled
-        generate_config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            thinking_config=types.ThinkingConfig(
-                thinking_level="HIGH",
-            ),
-            tools=[tools],
-            temperature=1.0,
-        )
+        # Configure generation
+        # NOTE: OpenRouter compatibility mode disables Gemini-specific thinking+tools
+        # to prevent hanging calls on some OpenRouter routes.
+        if openrouter_mode:
+            generate_config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=1.0,
+            )
+        else:
+            generate_config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                thinking_config=types.ThinkingConfig(
+                    thinking_level="HIGH",
+                ),
+                tools=[tools],
+                temperature=1.0,
+            )
         
         # Call the model
         try:
             print("🤖 Calling Gemini model...\n")
+            call_start = time.time()
             
             # Use non-streaming to get complete response with thought_signature
             response = client.models.generate_content(
                 model=MODEL_NAME,
                 contents=contents,
-                config=generate_config,
+                config=types.GenerateContentConfig(
+                    **generate_config.model_dump(exclude_none=True),
+                    http_options=types.HttpOptions(timeout=API_TIMEOUT_SECONDS * 1000),
+                ),
             )
+            if DEBUG_API:
+                print(f"⏱️  API call completed in {time.time() - call_start:.1f}s")
             
             # Process the response
             thinking_text = ""
