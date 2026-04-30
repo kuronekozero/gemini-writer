@@ -39,6 +39,9 @@ MODEL_NAME = os.getenv("MODEL_NAME", "gemini-3-flash-preview")
 BACKUP_INTERVAL = 50  # Save backup summary every N iterations
 API_TIMEOUT_SECONDS = int(os.getenv("API_TIMEOUT_SECONDS", "90"))
 DEBUG_API = os.getenv("DEBUG_API", "1").lower() in {"1", "true", "yes", "on"}
+OPENROUTER_MAX_TOKENS = int(os.getenv("OPENROUTER_MAX_TOKENS", "4000"))
+OPENROUTER_PARTS = int(os.getenv("OPENROUTER_PARTS", "8"))
+OPENROUTER_MAX_ITERATIONS = int(os.getenv("OPENROUTER_MAX_ITERATIONS", "20"))
 
 
 def load_context_from_file(file_path: str) -> str:
@@ -256,71 +259,105 @@ def main():
     ))
 
     if openrouter_mode:
-        print("🚀 OpenRouter quick-run mode: sending one chat-completions request.\n")
+        print("🚀 OpenRouter iterative mode: generating long-form output in multiple steps.\n")
         try:
             call_start = time.time()
-            payload = {
-                "model": MODEL_NAME,
-                "messages": [
-                    {"role": "system", "content": get_system_prompt()},
-                    {"role": "user", "content": initial_message},
-                ],
-                "temperature": 1.0,
-            }
-            with httpx.Client(timeout=API_TIMEOUT_SECONDS) as http:
-                response = http.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-            response.raise_for_status()
-            data = response.json()
-            message = data.get("choices", [{}])[0].get("message", {})
-            raw_content = message.get("content")
-            if isinstance(raw_content, str):
-                content_text = raw_content
-            elif isinstance(raw_content, list):
-                text_chunks = []
-                for item in raw_content:
-                    if isinstance(item, dict) and item.get("type") == "text":
-                        text_chunks.append(item.get("text", ""))
-                content_text = "\n".join(chunk for chunk in text_chunks if chunk).strip()
-            else:
-                content_text = ""
-
-            if not content_text:
-                reasoning = data.get("choices", [{}])[0].get("reasoning")
-                if isinstance(reasoning, str) and reasoning.strip():
-                    content_text = reasoning.strip()
-                else:
-                    content_text = (
-                        "Model returned no text content. "
-                        "Try lowering prompt size, setting max_tokens, or using a different model."
-                    )
-            print("💬 Response:")
-            print("-" * 60)
-            print(content_text)
-            print("-" * 60)
+            parts = OPENROUTER_PARTS if len(initial_message) > 5000 else max(3, OPENROUTER_PARTS // 2)
+            print(f"🧩 Planned parts: {parts} | max_tokens/part: {OPENROUTER_MAX_TOKENS} | max_iterations: {OPENROUTER_MAX_ITERATIONS}\n")
 
             project_name = f"openrouter_{time.strftime('%Y%m%d_%H%M%S')}"
             create_status = create_project_impl(project_name=project_name)
             print(f"\n📁 {create_status}")
-            save_status = write_file_impl(
-                filename="book.md",
-                content=str(content_text),
-                mode="create",
-            )
-            print(f"💾 {save_status}")
-            if "no text content" in content_text.lower():
-                debug_status = write_file_impl(
-                    filename="openrouter_raw_response.json",
-                    content=json.dumps(data, ensure_ascii=False, indent=2),
-                    mode="create",
+            history_messages = [{"role": "system", "content": get_system_prompt()}]
+            history_messages.append({
+                "role": "user",
+                "content": (
+                    f"{initial_message}\n\n"
+                    "IMPORTANT EXECUTION RULES:\n"
+                    "1) Write the full book in multiple continuous parts.\n"
+                    "2) End every partial response with: [[CONTINUE]]\n"
+                    "3) End the final response with: [[BOOK_COMPLETE]]\n"
+                    "4) Never restart from the beginning.\n"
+                ),
+            })
+
+            part_index = 0
+            while part_index < OPENROUTER_MAX_ITERATIONS:
+                part_index += 1
+                if part_index == 1:
+                    user_content = "Start writing PART 1 now."
+                else:
+                    user_content = (
+                        "Continue from the exact last sentence. "
+                        "Do not repeat prior text. Continue the same book."
+                    )
+                history_messages.append({"role": "user", "content": user_content})
+                approx_prompt_tokens = sum(len(m.get("content", "")) for m in history_messages) // 4
+                print(f"\n📊 Iteration {part_index}/{OPENROUTER_MAX_ITERATIONS} | Approx prompt tokens: {approx_prompt_tokens:,}")
+
+                payload = {
+                    "model": MODEL_NAME,
+                    "messages": history_messages,
+                    "temperature": 1.0,
+                    "max_tokens": OPENROUTER_MAX_TOKENS,
+                }
+                with httpx.Client(timeout=API_TIMEOUT_SECONDS) as http:
+                    response = http.post(
+                        "https://openrouter.ai/api/v1/chat/completions",
+                        headers={
+                            "Authorization": f"Bearer {api_key}",
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
+                response.raise_for_status()
+                data = response.json()
+                message = data.get("choices", [{}])[0].get("message", {})
+                raw_content = message.get("content")
+                if isinstance(raw_content, str):
+                    content_text = raw_content
+                elif isinstance(raw_content, list):
+                    text_chunks = []
+                    for item in raw_content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            text_chunks.append(item.get("text", ""))
+                    content_text = "\n".join(chunk for chunk in text_chunks if chunk).strip()
+                else:
+                    content_text = ""
+
+                if not content_text:
+                    reasoning = data.get("choices", [{}])[0].get("reasoning")
+                    if isinstance(reasoning, str) and reasoning.strip():
+                        content_text = reasoning.strip()
+                    else:
+                        content_text = (
+                            "Model returned no text content. "
+                            "Try lowering prompt size, setting max_tokens, or using a different model."
+                        )
+
+                mode = "create" if part_index == 1 else "append"
+                header = f"\n\n# Part {part_index}\n\n"
+                save_status = write_file_impl(
+                    filename="book.md",
+                    content=f"{header}{str(content_text)}",
+                    mode=mode,
                 )
-                print(f"🧪 {debug_status}")
+                print(f"💾 Part {part_index}/{parts}: {save_status}")
+                history_messages.append({"role": "assistant", "content": str(content_text)})
+                approx_output_tokens = len(str(content_text)) // 4
+                print(f"📈 Approx output tokens this part: {approx_output_tokens:,}")
+
+                if "[[BOOK_COMPLETE]]" in str(content_text):
+                    print("\n✅ Model indicated completion with [[BOOK_COMPLETE]].")
+                    break
+
+                if "no text content" in content_text.lower():
+                    debug_status = write_file_impl(
+                        filename=f"openrouter_raw_response_part_{part_index}.json",
+                        content=json.dumps(data, ensure_ascii=False, indent=2),
+                        mode="create",
+                    )
+                    print(f"🧪 {debug_status}")
             active_folder = get_active_project_folder()
             if active_folder:
                 print(f"📍 Output path: {active_folder}{os.sep}book.md")
